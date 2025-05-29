@@ -1,5 +1,4 @@
-#@baseUrl=http://evcc.local:7070
-@baseUrl=http://192.168.40.227:7070
+@baseUrl=http://evcc.local:7070
 
 
 ### get evcc state
