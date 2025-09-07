@@ -1,0 +1,5 @@
+@baseUrl=http://evcc.local:7070
+
+
+### get evcc state
+GET {{baseUrl}}/api/state
