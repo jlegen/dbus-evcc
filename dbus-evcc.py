@@ -72,7 +72,7 @@ class DbusEvccChargerService:
             self._dbusservice.add_path(
                 path, settings['initial'], gettextcallback=settings['textformat'], writeable=False)
 
-		try:
+        try:
             self._dbusservice.register()
         except dbus.exceptions.DBusException as e:
             logging.error(f"Error registering at dbus: {e}")
