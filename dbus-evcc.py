@@ -3,6 +3,7 @@
 # import normal packages
 import platform
 import logging
+from logging.handlers import TimedRotatingFileHandler
 import os
 import sys
 
@@ -16,18 +17,19 @@ import requests  # for http GET
 import configparser  # for config/ini file
 
 # our own packages from victron
-sys.path.insert(1, os.path.join(os.path.dirname(__file__), '/opt/victronenergy/dbus-systemcalc-py/ext/velib_python'))
+sys.path.insert(1, '/opt/victronenergy/dbus-systemcalc-py/ext/velib_python')
 from vedbus import VeDbusService
 
 
 class DbusEvccChargerService:
     def __init__(self, servicename, paths, productname='EVCC-Charger', connection='EVCC REST API'):
         config = self._getConfig()
-        deviceinstance = int(config['DEFAULT']['Deviceinstance'])
         global lpInstance
+        deviceinstance = int(config['DEFAULT']['Deviceinstance'])
         lpInstance = int(config['DEFAULT']['LoadpointInstance'])
+        acPosition = int(config['DEFAULT']['AcPosition'])
 
-        self._dbusservice = VeDbusService("{}.http_{:02d}".format(servicename, deviceinstance))
+        self._dbusservice = VeDbusService("{}.http_{:02d}".format(servicename, deviceinstance), register=False)
         self._paths = paths
 
         logging.debug("%s /DeviceInstance = %d" % (servicename, deviceinstance))
@@ -38,8 +40,7 @@ class DbusEvccChargerService:
         ]
 
         # get data from go-eCharger
-        data = self._getEvccChargerData()
-        result = data["result"]
+        result = self._getEvccChargerData()
         loadpoint = result["loadpoints"][lpInstance]
 
         # Set custom name from loadpoint title
@@ -53,16 +54,14 @@ class DbusEvccChargerService:
 
         # Create the mandatory objects
         self._dbusservice.add_path('/DeviceInstance', deviceinstance)
-        self._dbusservice.add_path('/ProductId', 0xFFFF)  #
+        self._dbusservice.add_path('/ProductId', 0xC025)  #
         self._dbusservice.add_path('/ProductName', productname)
         self._dbusservice.add_path('/CustomName', customname)
-        #self._dbusservice.add_path('/FirmwareVersion', int(data['divert_update']))
         self._dbusservice.add_path('/HardwareVersion', 2)
-        #self._dbusservice.add_path('/Serial', data['comm_success'])
         self._dbusservice.add_path('/Connected', 1)
         self._dbusservice.add_path('/UpdateIndex', 0)
 
-        self._dbusservice.add_path('/Position', 1) # 0: ac out, 1: ac in
+        self._dbusservice.add_path('/Position', acPosition)
 
         # add paths without units
         for path in paths_wo_unit:
@@ -72,6 +71,12 @@ class DbusEvccChargerService:
         for path, settings in self._paths.items():
             self._dbusservice.add_path(
                 path, settings['initial'], gettextcallback=settings['textformat'], writeable=False)
+
+		try:
+            self._dbusservice.register()
+        except dbus.exceptions.DBusException as e:
+            logging.error(f"Error registering at dbus: {e}")
+            raise
 
         # last update
         self._lastUpdate = 0
@@ -124,7 +129,12 @@ class DbusEvccChargerService:
         if not json_data:
             raise ValueError("Converting response to JSON failed")
 
-        return json_data
+        # until evcc version 0.205.0 there was a "result" wrapper in the JSON
+        # support both cases for now
+        if ("result" in json_data):
+            return json_data["result"]
+        else:
+            return json_data
 
     def _signOfLife(self):
         logging.info("--- Start: sign of life ---")
@@ -135,25 +145,31 @@ class DbusEvccChargerService:
 
     def _update(self):
         try:
-            # get data from go-eCharger
-            data = self._getEvccChargerData()
-            result = data["result"]
+            # get data from Charger
+            result = self._getEvccChargerData()
             loadpoint = result["loadpoints"][lpInstance]
 
-            # send data to DBus
-
-            # not really needed, but can be enabled
-            voltage = 230 # adjust to your voltage
-            self._dbusservice['/Ac/L1/Power'] = float(loadpoint['chargeCurrents'][0]) * voltage # watt
-            self._dbusservice['/Ac/L2/Power'] = float(loadpoint['chargeCurrents'][1]) * voltage # watt
-            self._dbusservice['/Ac/L3/Power'] = float(loadpoint['chargeCurrents'][2]) * voltage # watt
+			charge_voltages = loadpoint.get('chargeVoltages', [0, 0, 0])
+            voltage1 = float(charge_voltages[0])
+            voltage2 = float(charge_voltages[1])
+            voltage3 = float(charge_voltages[2])
+            voltage = (voltage1 + voltage2 + voltage3) / 3
             self._dbusservice['/Ac/Voltage'] = voltage
-
+			
+			charge_currents = loadpoint.get('chargeCurrents', [0, 0, 0])
+            self._dbusservice['/Ac/L1/Power'] = float(charge_currents[0]) * voltage # watt
+            self._dbusservice['/Ac/L2/Power'] = float(charge_currents[1]) * voltage # watt
+            self._dbusservice['/Ac/L3/Power'] = float(charge_currents[2]) * voltage # watt
             self._dbusservice['/Ac/Power'] = float(loadpoint['chargePower']) # w
-            self._dbusservice['/Current'] = float(loadpoint['chargeCurrent'])
 
-            self._dbusservice['/SetCurrent'] = float(loadpoint['chargeCurrent'])
-            self._dbusservice['/MaxCurrent'] = int(loadpoint['maxCurrent']) # int(data['ama'])
+			if voltage == 0:
+                 self._dbusservice['/Current'] = 0
+                 self._dbusservice['/SetCurrent'] = 0
+            else:
+                self._dbusservice['/Current'] = float(loadpoint['chargePower']) / voltage
+                self._dbusservice['/SetCurrent'] = float(loadpoint['chargePower']) / voltage
+
+            self._dbusservice['/MaxCurrent'] = int(loadpoint['maxCurrent'])
 
 
             # 0: Manual, 1: Auto, 2: Scheduled
@@ -181,13 +197,10 @@ class DbusEvccChargerService:
             # is this session charged energy or total charged energy?
             if status == 0:
                 self._dbusservice['/Ac/Energy/Forward'] = 0
+                self._dbusservice['/ChargingTime'] = 0			
             else:
                 self._dbusservice['/Ac/Energy/Forward'] = float(loadpoint['chargedEnergy']) / 1000  # kWh
-
-            if status == 0:
-                self._dbusservice['/ChargingTime'] = 0
-            else:
-                self._dbusservice['/ChargingTime'] = int(loadpoint["chargeDuration"])/1000000000  # s
+				self._dbusservice['/ChargingTime'] = int(loadpoint['chargeDuration']) # s
 
             # logging
             logging.debug("Wallbox Consumption (/Ac/Power): %s" % (self._dbusservice['/Ac/Power']))
@@ -212,12 +225,18 @@ class DbusEvccChargerService:
 def main():
     # configure logging
     logging.basicConfig(format='%(asctime)s,%(msecs)d %(name)s %(levelname)s %(message)s',
-                        datefmt='%Y-%m-%d %H:%M:%S',
-                        level=logging.INFO,
-                        handlers=[
-                            logging.FileHandler("%s/current.log" % (os.path.dirname(os.path.realpath(__file__)))),
-                            logging.StreamHandler()
-                        ])
+                    datefmt='%Y-%m-%d %H:%M:%S',
+                    level=logging.INFO,
+                    handlers=[
+                        TimedRotatingFileHandler(
+                            filename="%s/current.log" % (os.path.dirname(os.path.realpath(__file__))),
+                            when="midnight",        # rotiert täglich um Mitternacht
+                            interval=1,
+                            backupCount=1,          # nur 1 vorherige Logdatei behalten
+                            encoding="utf-8"
+                        ),
+                        logging.StreamHandler()
+                    ])
 
     try:
         logging.info("Start")
