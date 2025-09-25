@@ -150,7 +150,7 @@ class DbusEvccChargerService:
             loadpoint = result["loadpoints"][lpInstance]
 
             voltage = 230
-			#charge_voltages = loadpoint.get('chargeVoltages', [0, 0, 0])
+            #charge_voltages = loadpoint.get('chargeVoltages', [0, 0, 0])
             #voltage1 = float(charge_voltages[0])
             #voltage2 = float(charge_voltages[1])
             #voltage3 = float(charge_voltages[2])
