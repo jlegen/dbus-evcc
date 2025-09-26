@@ -27,14 +27,18 @@ class DbusEvccChargerService:
         config = self._getConfig()
         global lpInstance
         global vebus
+        global staticVoltage
         deviceinstance = int(config['DEFAULT']['Deviceinstance'])
         lpInstance = int(config['DEFAULT']['LoadpointInstance'])
         acPosition = int(config['DEFAULT']['AcPosition'])
         acVoltage = config['DEFAULT']['AcVoltage']
         veBusDevice = config['DEFAULT']['VEBusDev']
+        staticVoltage = int(config['DEFAULT']['StaticVoltage'])
 
         if acVoltage == "vebus":
             vebus = True
+        else:
+            vebus = False
 
         self._dbusservice = VeDbusService("{}.http_{:02d}".format(servicename, deviceinstance), register=False)
         self._paths = paths
@@ -185,7 +189,10 @@ class DbusEvccChargerService:
                 present_vs = [v for v in (v1, v2, v3) if v > 0.0]
                 voltage_avg = (sum(present_vs) / len(present_vs)) if present_vs else 0.0
             else:
-                voltage_avg = 230
+                voltage_avg = staticVoltage
+                v1 = 0
+                v2 = 0
+                v3 = 0
                 
             self._dbusservice['/Ac/Voltage'] = voltage_avg  # average voltage
 
