@@ -15,22 +15,40 @@ import sys
 import time
 import requests  # for http GET
 import configparser  # for config/ini file
+import dbus
 
 # our own packages from victron
 sys.path.insert(1, '/opt/victronenergy/dbus-systemcalc-py/ext/velib_python')
-from vedbus import VeDbusService
+from vedbus import VeDbusService, VeDbusItemImport
 
 
 class DbusEvccChargerService:
     def __init__(self, servicename, paths, productname='EVCC-Charger', connection='EVCC REST API'):
         config = self._getConfig()
         global lpInstance
+        global vebus
         deviceinstance = int(config['DEFAULT']['Deviceinstance'])
         lpInstance = int(config['DEFAULT']['LoadpointInstance'])
         acPosition = int(config['DEFAULT']['AcPosition'])
+        acVoltage = config['DEFAULT']['AcVoltage']
+        veBusDevice = config['DEFAULT']['VEBusDev']
+
+        if acVoltage == "vebus":
+            vebus = True
 
         self._dbusservice = VeDbusService("{}.http_{:02d}".format(servicename, deviceinstance), register=False)
         self._paths = paths
+
+        if vebus == True:
+            # --- read AC-out voltages from VE.Bus (MultiPlus-II) via velib_python ---
+            self._bus = dbus.SystemBus()
+            #self._vebus_service = 'com.victronenergy.vebus.ttyS4'  # multiplus-2 3-phase-system 
+            self._vebus_service = veBusDevice  # multiplus-2 3-phase-system 
+            self._v_items = {
+                'L1': VeDbusItemImport(self._bus, self._vebus_service, '/Ac/Out/L1/V'),
+                'L2': VeDbusItemImport(self._bus, self._vebus_service, '/Ac/Out/L2/V'),
+                'L3': VeDbusItemImport(self._bus, self._vebus_service, '/Ac/Out/L3/V'),
+            }
 
         logging.debug("%s /DeviceInstance = %d" % (servicename, deviceinstance))
 
@@ -39,7 +57,7 @@ class DbusEvccChargerService:
             '/Mode'
         ]
 
-        # get data from go-eCharger
+        # get data from eCharger
         result = self._getEvccChargerData()
         loadpoint = result["loadpoints"][lpInstance]
 
@@ -54,7 +72,7 @@ class DbusEvccChargerService:
 
         # Create the mandatory objects
         self._dbusservice.add_path('/DeviceInstance', deviceinstance)
-        self._dbusservice.add_path('/ProductId', 0xC025)  #
+        self._dbusservice.add_path('/ProductId', 0xC025)
         self._dbusservice.add_path('/ProductName', productname)
         self._dbusservice.add_path('/CustomName', customname)
         self._dbusservice.add_path('/HardwareVersion', 2)
@@ -140,6 +158,8 @@ class DbusEvccChargerService:
         logging.info("--- Start: sign of life ---")
         logging.info("Last _update() call: %s" % (self._lastUpdate))
         logging.info("Last '/Ac/Power': %s" % (self._dbusservice['/Ac/Power']))
+        logging.info("Last '/Current': %s" % (self._dbusservice['/Current']))
+        logging.info("Last '/Ac/Voltage': %s" % (self._dbusservice['/Ac/Voltage']))
         logging.info("--- End: sign of life ---")
         return True
 
@@ -149,29 +169,49 @@ class DbusEvccChargerService:
             result = self._getEvccChargerData()
             loadpoint = result["loadpoints"][lpInstance]
 
-            voltage = 230
+            # does not work - evcc api does not provide chargeVoltages (evcc 0.207)
             #charge_voltages = loadpoint.get('chargeVoltages', [0, 0, 0])
             #voltage1 = float(charge_voltages[0])
             #voltage2 = float(charge_voltages[1])
             #voltage3 = float(charge_voltages[2])
-            #voltage = (voltage1 + voltage2 + voltage3) / 3
-            self._dbusservice['/Ac/Voltage'] = voltage
-			
+            #voltage_avg = (voltage1 + voltage2 + voltage3) / 3
+
+            if vebus == True:
+                # --- data from VE.Bus (L1/L2/L3) ---
+                v1 = float(self._v_items['L1'].get_value() or 0)
+                v2 = float(self._v_items['L2'].get_value() or 0)
+                v3 = float(self._v_items['L3'].get_value() or 0)
+
+                present_vs = [v for v in (v1, v2, v3) if v > 0.0]
+                voltage_avg = (sum(present_vs) / len(present_vs)) if present_vs else 0.0
+            else:
+                voltage_avg = 230
+                
+            self._dbusservice['/Ac/Voltage'] = voltage_avg  # average voltage
+
+            # per-phase power uses each phase’s own voltage (fallback to avg if a phase is 0)
             charge_currents = loadpoint.get('chargeCurrents', [0, 0, 0])
-            self._dbusservice['/Ac/L1/Power'] = float(charge_currents[0]) * voltage # watt
-            self._dbusservice['/Ac/L2/Power'] = float(charge_currents[1]) * voltage # watt
-            self._dbusservice['/Ac/L3/Power'] = float(charge_currents[2]) * voltage # watt
+            i1, i2, i3 = float(charge_currents[0]), float(charge_currents[1]), float(charge_currents[2])
+
+            p1 = i1 * (v1 if v1 > 0.0 else voltage_avg)
+            p2 = i2 * (v2 if v2 > 0.0 else voltage_avg)
+            p3 = i3 * (v3 if v3 > 0.0 else voltage_avg)
+
+            self._dbusservice['/Ac/L1/Power'] = p1
+            self._dbusservice['/Ac/L2/Power'] = p2
+            self._dbusservice['/Ac/L3/Power'] = p3
+            # --- end ve.bus data ---
+
             self._dbusservice['/Ac/Power'] = float(loadpoint['chargePower']) # w
 
-            if voltage == 0:
+            if voltage_avg == 0:
                  self._dbusservice['/Current'] = 0
                  self._dbusservice['/SetCurrent'] = 0
             else:
-                self._dbusservice['/Current'] = float(loadpoint['chargePower']) / voltage
-                self._dbusservice['/SetCurrent'] = float(loadpoint['chargePower']) / voltage
+                self._dbusservice['/Current'] = float(loadpoint['chargePower']) / voltage_avg
+                self._dbusservice['/SetCurrent'] = float(loadpoint['chargePower']) / voltage_avg
 
             self._dbusservice['/MaxCurrent'] = int(loadpoint['maxCurrent'])
-
 
             # 0: Manual, 1: Auto, 2: Scheduled
             if "pv" in loadpoint["mode"]:
@@ -184,7 +224,7 @@ class DbusEvccChargerService:
                 self._dbusservice['/Mode'] = 0
                 self._dbusservice['/StartStop'] = 1
 
-	        # 0:EVdisconnected; 1:Connected; 2:Charging; 3:Charged; 4:Wait sun; 5:Wait RFID; 6:Wait enable; 7:Low SOC; 8:Ground error; 9:Welded contacts error; defaut:Unknown;
+	    # 0:EVdisconnected; 1:Connected; 2:Charging; 3:Charged; 4:Wait sun; 5:Wait RFID; 6:Wait enable; 7:Low SOC; 8:Ground error; 9:Welded contacts error; defaut:Unknown;
             status = 0
             if loadpoint['connected'] == False:
                 status = 0
