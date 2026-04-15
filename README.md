@@ -28,6 +28,9 @@ Within the project there is a file `/data/dbus-evcc/config.ini` - just change th
 | DEFAULT  | AccessType | Fixed value 'OnPremise' |
 | DEFAULT  | SignOfLifeLog  | Time in minutes how often a status is added to the log-file `current.log` with log-level INFO |
 | DEFAULT  | Deviceinstance | Unique ID identifying the charger in Venus OS |
+| DEFAULT  | VEBusDev | optional: provide VEBus device to fetch grid voltages |
+| DEFAULT  | StaticVoltage | optional: use static grid voltage to calculate power |
+| DEFAULT  | AcPosition | Charger AC-Position: 0 = AC out, 1 = AC in |
 | ONPREMISE  | Host | IP or hostname of EVCC |
 
 ## If you have two load points in EVCC

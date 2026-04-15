@@ -28,13 +28,15 @@ class DbusEvccChargerService:
         global lpInstance
         global vebus
         global staticVoltage
+        global apiInterval
         deviceinstance = int(config['DEFAULT']['Deviceinstance'])
         lpInstance = int(config['DEFAULT']['LoadpointInstance'])
         acPosition = int(config['DEFAULT']['AcPosition'])
         acVoltage = config['DEFAULT']['AcVoltage']
         veBusDevice = config['DEFAULT']['VEBusDev']
         staticVoltage = int(config['DEFAULT']['StaticVoltage'])
-
+        apiInterval = max(int(config['DEFAULT']['ApiInterval']), 2000)
+        
         if acVoltage == "vebus":
             vebus = True
         else:
@@ -46,7 +48,6 @@ class DbusEvccChargerService:
         if vebus == True:
             # --- read AC-out voltages from VE.Bus (MultiPlus-II) via velib_python ---
             self._bus = dbus.SystemBus()
-            #self._vebus_service = 'com.victronenergy.vebus.ttyS4'  # multiplus-2 3-phase-system 
             self._vebus_service = veBusDevice  # multiplus-2 3-phase-system 
             self._v_items = {
                 'L1': VeDbusItemImport(self._bus, self._vebus_service, '/Ac/Out/L1/V'),
@@ -107,9 +108,9 @@ class DbusEvccChargerService:
         self._chargingTime = 0.0
 
         # add _update function 'timer'
-        gobject.timeout_add(2000, self._update)  # pause 2sec before the next request
+        gobject.timeout_add(apiInterval, self._update)  # pause before the next request
 
-        # add _signOfLife 'timer' to get feedback in log every 5minutes
+        # add _signOfLife 'timer' to get feedback in log every 5 minutes
         gobject.timeout_add(self._getSignOfLifeInterval() * 60 * 1000, self._signOfLife)
 
     def _getConfig(self):
@@ -169,36 +170,32 @@ class DbusEvccChargerService:
 
     def _update(self):
         try:
-            # get data from Charger
             result = self._getEvccChargerData()
             loadpoint = result["loadpoints"][lpInstance]
 
-            # does not work - evcc api does not provide chargeVoltages (evcc 0.207)
-            #charge_voltages = loadpoint.get('chargeVoltages', [0, 0, 0])
-            #voltage1 = float(charge_voltages[0])
-            #voltage2 = float(charge_voltages[1])
-            #voltage3 = float(charge_voltages[2])
-            #voltage_avg = (voltage1 + voltage2 + voltage3) / 3
+            v1 = v2 = v3 = 0.0
 
-            if vebus == True:
-                # --- data from VE.Bus (L1/L2/L3) ---
-                v1 = float(self._v_items['L1'].get_value() or 0)
-                v2 = float(self._v_items['L2'].get_value() or 0)
-                v3 = float(self._v_items['L3'].get_value() or 0)
-
-                present_vs = [v for v in (v1, v2, v3) if v > 0.0]
-                voltage_avg = (sum(present_vs) / len(present_vs)) if present_vs else 0.0
-            else:
+            if vebus:
+                    v1 = float(self._v_items['L1'].get_value() or 0)
+                    v2 = float(self._v_items['L2'].get_value() or 0)
+                    v3 = float(self._v_items['L3'].get_value() or 0)
+            elif staticVoltage:
                 voltage_avg = staticVoltage
-                v1 = 0
-                v2 = 0
-                v3 = 0
-                
-            self._dbusservice['/Ac/Voltage'] = voltage_avg  # average voltage
+            else:
+                cvs = loadpoint.get('chargeVoltages') or []
+                v1 = float(cvs[0]) if len(cvs) > 0 else 0.0
+                v2 = float(cvs[1]) if len(cvs) > 1 else 0.0
+                v3 = float(cvs[2]) if len(cvs) > 2 else 0.0
+
+            if not staticVoltage or vebus:
+                present = [v for v in (v1, v2, v3) if v > 0]
+                voltage_avg = sum(present) / len(present) if present else 0.0
+
+            self._dbusservice['/Ac/Voltage'] = int(voltage_avg)
 
             # per-phase power uses each phase’s own voltage (fallback to avg if a phase is 0)
-            charge_currents = loadpoint.get('chargeCurrents', [0, 0, 0])
-            i1, i2, i3 = float(charge_currents[0]), float(charge_currents[1]), float(charge_currents[2])
+            ccs = loadpoint.get('chargeCurrents', [0, 0, 0]) or []
+            i1, i2, i3 = float(ccs[0])  if len(ccs) > 0 else 0.0, float(ccs[1]) if len(ccs) > 1 else 0.0, float(ccs[2] if len(ccs) > 2 else 0.0)
 
             p1 = i1 * (v1 if v1 > 0.0 else voltage_avg)
             p2 = i2 * (v2 if v2 > 0.0 else voltage_avg)
@@ -321,6 +318,8 @@ def main():
         )
 
         logging.info('Connected to dbus, and switching over to gobject.MainLoop() (= event based)')
+        logging.info("Configured voltage source: %s",  "dbus-device" if vebus else ("static" if staticVoltage else "none, trying evcc"))
+        logging.info("Configured evcc API call interval: %d ms", apiInterval)
         mainloop = gobject.MainLoop()
         mainloop.run()
     except Exception as e:
